@@ -1,6 +1,8 @@
 # Assembler
 a simple assembler (riscv64) 
 
+riscv64-linux-gnu-gcc -S test.c -o test.s
+
 g++ -std=c++17 Assembler.cpp -o myasstest
 ./myasstest test.s 
 (output.o)

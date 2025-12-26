@@ -268,6 +268,97 @@ uint32_t encode_j_type(const string &op, int rd, long long rel){
     if(op=="jal") return pack_j((int32_t)rel, rd, 0x6f);
     throw runtime_error("Unknown J-type: "+op);
 }
+
+// 尝试展开伪指令
+// 返回 true 表示 toks 已被展开到 out 中
+static bool expand_pseudo(
+    const vector<string>& toks,
+    vector<vector<string>>& out)
+{
+    if(toks.empty()) return false;
+
+    const string &op = toks[0];
+
+    //  控制流 
+    if(op == "j"){
+        out.push_back({"jal", "x0", toks[1]});
+        return true;
+    }
+
+    if(op == "jr"){
+        out.push_back({"jalr", "x0", toks[1], "0"});
+        return true;
+    }
+
+    if(op == "ret"){
+        out.push_back({"jalr", "x0", "ra", "0"});
+        return true;
+    }
+
+    //  条件分支 
+    if(op == "beqz"){
+        out.push_back({"beq", toks[1], "x0", toks[2]});
+        return true;
+    }
+
+    if(op == "bnez"){
+        out.push_back({"bne", toks[1], "x0", toks[2]});
+        return true;
+    }
+
+    // ble rs1, rs2, L  ->  bge rs2, rs1, L
+    if(op == "ble"){
+        out.push_back({"bge", toks[2], toks[1], toks[3]});
+        return true;
+    }
+
+    if(op == "bgt"){
+        out.push_back({"blt", toks[2], toks[1], toks[3]});
+        return true;
+    }
+
+    if(op == "bleu"){
+        out.push_back({"bgeu", toks[2], toks[1], toks[3]});
+        return true;
+    }
+
+    if(op == "bgtu"){
+        out.push_back({"bltu", toks[2], toks[1], toks[3]});
+        return true;
+    }
+
+    //  数据搬运 
+    if(op == "mv"){
+        out.push_back({"addi", toks[1], toks[2], "0"});
+        return true;
+    }
+
+    if(op == "nop"){
+        out.push_back({"addi", "x0", "x0", "0"});
+        return true;
+    }
+
+    //  简单算术 / 比较 
+    if(op == "neg"){
+        out.push_back({"sub", toks[1], "x0", toks[2]});
+        return true;
+    }
+
+    if(op == "seqz"){
+        out.push_back({"sltiu", toks[1], toks[2], "1"});
+        return true;
+    }
+
+    if(op == "snez"){
+        out.push_back({"sltu", toks[1], "x0", toks[2]});
+        return true;
+    }
+
+    return false;
+}
+
+
+
 //解析立即数偏移寻址
 pair<long long,int> parse_mem_operand(const vector<string> &toks, int startIdx){
     if(startIdx+3 >= (int)toks.size()) throw runtime_error("bad memory operand");
@@ -366,72 +457,26 @@ int main(int argc, char**argv){
             return 3;
         }
 
-        string op=toks[0];
-        //mv rd,rs ->addi rd,rs,0
-        if(op=="mv"){
-            if(toks.size()<3) { 
-                cerr<<"mv operand error line "<<L.lineno<<"\n"; return 4; 
-            }
-            vector<string> t1={"addi",toks[1],toks[2],"0"};
-            Instr ins; ins.lineno=L.lineno; ins.sec=cursec; ins.toks=t1;
-            if(cursec==SEC_TEXT){ ins.offset = text_off; instrs.push_back(ins); text_off+=4; }
-            else { ins.offset = data_off; instrs.push_back(ins); data_off+=4; }
-            continue;
-        }
-        //jr ra ->jalr x0,ra,0
-        if(op=="jr"){
-            if(toks.size()<2) { cerr<<"jr operand error line "<<L.lineno<<"\n"; return 4; }
-            vector<string> t1 = {"jalr", "x0", toks[1], "0"}; // rd x0, rs1, imm
-            Instr ins; ins.lineno=L.lineno; ins.sec=cursec; ins.toks=t1;
-            if(cursec==SEC_TEXT){ ins.offset=text_off; instrs.push_back(ins); text_off+=4; }
-            else { ins.offset=data_off; instrs.push_back(ins); data_off+=4; }
-            continue;
-        }
-        //li rd, imm  -> either addi rd, x0, imm  (if fits) OR lui+addi
-        if(op=="li"){
-            if(toks.size()<3){ cerr<<"li operand error line "<<L.lineno<<"\n"; return 4; }
-            long long imm = parse_imm(toks[2]);
-            if(fits_signed(imm,12)){
-                vector<string> t1 = {"addi", toks[1], "x0", toks[2]};
-                Instr ins; ins.lineno=L.lineno; ins.sec=cursec; ins.toks=t1;
-                if(cursec==SEC_TEXT){ ins.offset=text_off; instrs.push_back(ins); text_off+=4; }
-                else { ins.offset=data_off; instrs.push_back(ins); data_off+=4; }
-                continue;
-            } else {
-                // expand to LUI + ADDI
-                // compute imm_hi = (imm + 0x800) >> 12  (rounding)
-                long long imm_hi = (imm + (1LL<<11)) >> 12;
-                long long imm_lo = imm - (imm_hi<<12);
-                long long lui_imm = imm_hi << 12;
-                // LUI rd, imm_hi<<12  (we'll pass full imm)
-                vector<string> t_lui = {"lui", toks[1], to_string(lui_imm)};
-                vector<string> t_addi = {"addi", toks[1], toks[1], to_string(imm_lo)};
-                Instr ins1; ins1.lineno=L.lineno; ins1.sec=cursec; ins1.toks=t_lui;
-                Instr ins2; ins2.lineno=L.lineno; ins2.sec=cursec; ins2.toks=t_addi;
-                if(cursec==SEC_TEXT){
-                    ins1.offset=text_off; instrs.push_back(ins1); text_off+=4;
-                    ins2.offset=text_off; instrs.push_back(ins2); text_off+=4;
-                } else {
-                    ins1.offset=data_off; instrs.push_back(ins1); data_off+=4;
-                    ins2.offset=data_off; instrs.push_back(ins2); data_off+=4;
+        vector<vector<string>> expanded;
+        if(expand_pseudo(toks, expanded)){
+            for(auto &et : expanded){
+                Instr ins;
+                ins.lineno = L.lineno;
+                ins.sec = cursec;
+                ins.toks = et;
+
+                if(cursec == SEC_TEXT){
+                    ins.offset = text_off;
+                    instrs.push_back(ins);
+                    text_off += 4;
+                }else if(cursec == SEC_DATA){
+                    ins.offset = data_off;
+                    instrs.push_back(ins);
+                    data_off += 4;
                 }
-                continue;
             }
+            continue; 
         }
-
-        Instr ins;
-        ins.lineno=L.lineno;
-        ins.sec=cursec;
-        ins.toks=toks;
-
-        if(cursec==SEC_TEXT){
-            ins.offset=text_off;
-            text_off+=4;
-        }else if(cursec==SEC_DATA){
-            ins.offset=data_off;
-            data_off+=4;
-        }
-        instrs.push_back(move(ins));
     }    
 
     //first pass done
