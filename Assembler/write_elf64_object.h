@@ -34,6 +34,7 @@ struct Label{
     string name;
     SectionKind sec;
     uint32_t addr;
+    bool is_global = false;  // .globl 声明的符号为 true
 };
 
 // 重定位条目（汇编阶段用符号名，写ELF时转为符号索引）
@@ -79,11 +80,21 @@ void write_elf64_object(
     }
 
     // --- SYMBOL NAMES (.strtab) ---
+    // ELF规范：local符号必须在global之前
+    vector<string> local_syms, global_syms;
+    for(auto &p : symtab_map){
+        if(p.second.is_global) global_syms.push_back(p.first);
+        else local_syms.push_back(p.first);
+    }
+    for(auto &n : undef_names) global_syms.push_back(n); // 未定义符号都是global
+    sort(local_syms.begin(), local_syms.end());
+    sort(global_syms.begin(), global_syms.end());
+
     vector<string> symnames;
-    symnames.push_back("");
-    for(auto &p : symtab_map) symnames.push_back(p.first);
-    for(auto &n : undef_names) symnames.push_back(n);
-    sort(symnames.begin()+1, symnames.end());
+    symnames.push_back("");  // null symbol (index 0)
+    for(auto &n : local_syms) symnames.push_back(n);
+    for(auto &n : global_syms) symnames.push_back(n);
+    uint32_t first_global_idx = 1 + local_syms.size(); // sh_info值
 
     // 符号名 -> 符号表索引
     unordered_map<string,uint32_t> sym_index;
@@ -118,7 +129,7 @@ void write_elf64_object(
             // 已定义符号
             const Label &lab = it->second;
             sym.st_value = lab.addr;
-            unsigned char bind = STB_GLOBAL;
+            unsigned char bind = lab.is_global ? STB_GLOBAL : STB_LOCAL;
             unsigned char type = (lab.sec==SEC_TEXT ? STT_FUNC : STT_OBJECT);
             sym.st_info = ELF64_ST_INFO(bind, type);
             if(lab.sec == SEC_TEXT) sym.st_shndx = 1;
@@ -219,7 +230,7 @@ void write_elf64_object(
     shdrs[4].sh_offset = symtab_off;
     shdrs[4].sh_size = symtab_vec.size() * sizeof(Elf64_Sym);
     shdrs[4].sh_link = 5; // -> .strtab
-    shdrs[4].sh_info = 1; // 第一个global符号的索引（null symbol是local）
+    shdrs[4].sh_info = first_global_idx; // 第一个global符号的索引
     shdrs[4].sh_addralign = 8;
     shdrs[4].sh_entsize = sizeof(Elf64_Sym);
 

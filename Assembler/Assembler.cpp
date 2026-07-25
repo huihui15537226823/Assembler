@@ -183,6 +183,77 @@ static inline bool fits_signed(long long v, int bits){
     return v>=lo && v<=hi;
 }
 
+// ========== 表驱动指令编码 ==========
+// 指令格式分类
+enum InstrFormat {
+    FMT_R,          // add rd, rs1, rs2
+    FMT_I_ARITH,    // addi rd, rs1, imm
+    FMT_I_ARITH_W,  // addiw rd, rs1, imm (opcode=0x1b)
+    FMT_I_SHIFT,    // slli rd, rs1, shamt (6-bit)
+    FMT_I_SHIFT_W,  // slliw rd, rs1, shamt (5-bit, opcode=0x1b)
+    FMT_I_LOAD,     // ld rd, imm(rs1)
+    FMT_I_JALR,     // jalr rd, rs1, imm
+    FMT_S,          // sd rs2, imm(rs1)
+    FMT_B,          // beq rs1, rs2, label
+    FMT_U,          // lui rd, imm
+    FMT_J,          // jal rd, label
+};
+
+// 指令定义：一条指令的完整编码信息
+struct InstrDef {
+    const char* mnemonic;
+    uint32_t opcode;
+    uint32_t funct3;
+    uint32_t funct7;   // 移位指令用
+    InstrFormat format;
+};
+
+// 指令表：覆盖 RV64I 全部基本指令 + W 变体
+static const InstrDef instr_table[] = {
+    // R-type (opcode=0x33)
+    {"add",  0x33, 0x0, 0x00, FMT_R},  {"sub",  0x33, 0x0, 0x20, FMT_R},
+    {"sll",  0x33, 0x1, 0x00, FMT_R},  {"slt",  0x33, 0x2, 0x00, FMT_R},
+    {"sltu", 0x33, 0x3, 0x00, FMT_R},  {"xor",  0x33, 0x4, 0x00, FMT_R},
+    {"srl",  0x33, 0x5, 0x00, FMT_R},  {"sra",  0x33, 0x5, 0x20, FMT_R},
+    {"or",   0x33, 0x6, 0x00, FMT_R},  {"and",  0x33, 0x7, 0x00, FMT_R},
+    // R-type W (opcode=0x3b)
+    {"addw", 0x3b, 0x0, 0x00, FMT_R},  {"subw", 0x3b, 0x0, 0x20, FMT_R},
+    {"sllw", 0x3b, 0x1, 0x00, FMT_R},  {"srlw", 0x3b, 0x5, 0x00, FMT_R},
+    {"sraw", 0x3b, 0x5, 0x20, FMT_R},
+    // I-type arith (opcode=0x13)
+    {"addi",  0x13, 0x0, 0, FMT_I_ARITH},  {"slti",  0x13, 0x2, 0, FMT_I_ARITH},
+    {"sltiu", 0x13, 0x3, 0, FMT_I_ARITH},  {"xori",  0x13, 0x4, 0, FMT_I_ARITH},
+    {"ori",   0x13, 0x6, 0, FMT_I_ARITH},  {"andi",  0x13, 0x7, 0, FMT_I_ARITH},
+    {"slli",  0x13, 0x1, 0x00, FMT_I_SHIFT},{"srli",  0x13, 0x5, 0x00, FMT_I_SHIFT},
+    {"srai",  0x13, 0x5, 0x20, FMT_I_SHIFT},
+    // I-type arith W (opcode=0x1b)
+    {"addiw", 0x1b, 0x0, 0, FMT_I_ARITH_W}, {"slliw", 0x1b, 0x1, 0x00, FMT_I_SHIFT_W},
+    {"srliw", 0x1b, 0x5, 0x00, FMT_I_SHIFT_W},{"sraiw", 0x1b, 0x5, 0x20, FMT_I_SHIFT_W},
+    // I-type load (opcode=0x03)
+    {"lb", 0x03, 0x0, 0, FMT_I_LOAD},  {"lh", 0x03, 0x1, 0, FMT_I_LOAD},
+    {"lw", 0x03, 0x2, 0, FMT_I_LOAD},  {"ld", 0x03, 0x3, 0, FMT_I_LOAD},
+    // I-type jalr (opcode=0x67)
+    {"jalr", 0x67, 0x0, 0, FMT_I_JALR},
+    // S-type (opcode=0x23)
+    {"sb", 0x23, 0x0, 0, FMT_S},  {"sh", 0x23, 0x1, 0, FMT_S},
+    {"sw", 0x23, 0x2, 0, FMT_S},  {"sd", 0x23, 0x3, 0, FMT_S},
+    // B-type (opcode=0x63)
+    {"beq",  0x63, 0x0, 0, FMT_B},  {"bne",  0x63, 0x1, 0, FMT_B},
+    {"blt",  0x63, 0x4, 0, FMT_B},  {"bge",  0x63, 0x5, 0, FMT_B},
+    {"bltu", 0x63, 0x6, 0, FMT_B},  {"bgeu", 0x63, 0x7, 0, FMT_B},
+    // U-type
+    {"lui",   0x37, 0, 0, FMT_U},  {"auipc", 0x17, 0, 0, FMT_U},
+    // J-type
+    {"jal", 0x6f, 0, 0, FMT_J},
+};
+
+// 查表：根据助记符查找指令定义
+const InstrDef* lookup_instr(const string& op){
+    for(auto& d : instr_table)
+        if(op == d.mnemonic) return &d;
+    return nullptr;
+}
+
 uint32_t encode_r_type(const string &op, int rd, int rs1, int rs2){
     // R-type: add, sub, sll, slt, sltu, xor, srl, sra, or, and
     //opcode=0x33
@@ -540,6 +611,7 @@ int main(int argc, char**argv){
     uint32_t data_off=0;
     vector<Instr> instrs;
     unordered_map<string,Label> symtab;
+    set<string> global_names; // .globl声明的符号名
 
     for(auto&L :lines){
         auto toks=tokenize_line(L.raw);
@@ -564,7 +636,7 @@ int main(int argc, char**argv){
                 cursec = SEC_DATA;
                 continue;
             } else if(d==".globl" || d==".global"){
-                // ignore for first pass (could mark global)
+                if(toks.size()>=2) global_names.insert(toks[1]);
                 continue;
             } else if(d==".align"){
                 if(toks.size()>=2){
@@ -649,6 +721,12 @@ int main(int argc, char**argv){
         }
     }    
 
+    // 标记全局符号
+    for(auto &gn : global_names){
+        auto it = symtab.find(gn);
+        if(it != symtab.end()) it->second.is_global = true;
+    }
+
     //first pass done
     // Print first pass summary (optional)
     cout<<"=== First pass results ===\n";
@@ -717,72 +795,83 @@ int main(int argc, char**argv){
             uint32_t encoded=0;
 
             try{
-                // R-type: op rd rs1 rs2
-            if(op=="add"||op=="sub"||op=="sll"||op=="slt"||op=="sltu"||op=="xor"||op=="srl"||op=="sra"||op=="or"||op=="and"||op=="addw"||op=="subw"||op=="sllw"||op=="srlw"||op=="sraw"){
-                if(ins.toks.size()<4) throw runtime_error("operand count");
-                int rd = reg_id(ins.toks[1]);
-                int rs1 = reg_id(ins.toks[2]);
-                int rs2 = reg_id(ins.toks[3]);
-                encoded = encode_r_type(op, rd, rs1, rs2);
-            }
-            // I-type arithmetic: addi, etc. form: addi rd rs1 imm
-            else if(op=="addi"||op=="slti"||op=="sltiu"||op=="xori"||op=="ori"||op=="andi"||op=="slli"||op=="srli"||op=="srai"||op=="addiw"||op=="slliw"||op=="srliw"||op=="sraiw"){
-                if(ins.toks.size()<4) throw runtime_error("operand count");
-                int rd = reg_id(ins.toks[1]);
-                int rs1 = reg_id(ins.toks[2]);
-                long long imm = parse_imm(ins.toks[3]);
-                encoded = encode_i_type(op, rd, rs1, imm);
-            }
-            // loads: ld rd, imm(rs1)
-            else if(op=="ld"||op=="lw"||op=="lh"||op=="lb"){
-                if(ins.toks.size()<4) throw runtime_error("bad load tokens");
-                // format: op rd imm ( rs1 )
-                int rd = reg_id(ins.toks[1]);
-                auto mem = parse_mem_operand(ins.toks, 2);
-                long long imm = mem.first; int rs1 = mem.second;
-                encoded = encode_i_type(op, rd, rs1, imm);
-            }
-            // stores: sd rs2, imm(rs1)
-            else if(op=="sd"||op=="sw"||op=="sh"||op=="sb"){
-                if(ins.toks.size()<4) throw runtime_error("bad store tokens");
-                int rs2 = reg_id(ins.toks[1]);
-                auto mem = parse_mem_operand(ins.toks, 2);
-                long long imm = mem.first; int rs1 = mem.second;
-                encoded = encode_s_type(op, rs2, rs1, imm);
-            }
-            // jalr: jalr rd rs1 imm  (our pseudo expansion uses x0, ra, 0 for jr)
-            else if(op=="jalr"){
-                if(ins.toks.size()<4) throw runtime_error("bad jalr");
-                int rd = reg_id(ins.toks[1]);
-                int rs1 = reg_id(ins.toks[2]);
-                long long imm = parse_imm(ins.toks[3]);
-                encoded = encode_i_type("jalr", rd, rs1, imm);
-            }
-            // jal: jal rd label   -> compute rel = label_addr - ins.offset
-            else if(op=="jal"){
-                if(ins.toks.size()<3) throw runtime_error("bad jal");
-                int rd = reg_id(ins.toks[1]);
-                string targ = ins.toks[2];
-                uint32_t tgt = get_label_addr(targ);
-                long long rel = (long long)tgt - (long long)ins.offset;
-                encoded = encode_j_type("jal", rd, rel);
-            }
-            // branches: beq rs1 rs2 label  -> encoded as branch with rel = label - ins.offset
-            else if(op=="beq"||op=="bne"||op=="blt"||op=="bge"||op=="bltu"||op=="bgeu"){
-                if(ins.toks.size()<4) throw runtime_error("bad branch");
-                int rs1 = reg_id(ins.toks[1]);
-                int rs2 = reg_id(ins.toks[2]);
-                string targ = ins.toks[3];
-                uint32_t tgt = get_label_addr(targ);
-                long long rel = (long long)tgt - (long long)ins.offset;
-                encoded = encode_b_type(op, rs1, rs2, rel);
-            }
-            // U-type: lui/auipc
-            else if(op=="lui"||op=="auipc"){
-                if(ins.toks.size()<3) throw runtime_error("bad u-type");
-                int rd = reg_id(ins.toks[1]);
-                long long imm = parse_imm(ins.toks[2]);
-                encoded = encode_u_type(op, rd, imm);
+                // 表驱动指令编码：查表 -> switch(format)
+            const InstrDef *def = lookup_instr(op);
+            if(def){
+                switch(def->format){
+                case FMT_R:
+                    if(ins.toks.size()<4) throw runtime_error("operand count");
+                    encoded = pack_r(def->funct7, reg_id(ins.toks[3]), reg_id(ins.toks[2]),
+                                     def->funct3, reg_id(ins.toks[1]), def->opcode);
+                    break;
+                case FMT_I_ARITH:
+                case FMT_I_ARITH_W: {
+                    if(ins.toks.size()<4) throw runtime_error("operand count");
+                    int rd=reg_id(ins.toks[1]); int rs1=reg_id(ins.toks[2]);
+                    long long imm=parse_imm(ins.toks[3]);
+                    if(!fits_signed(imm,12)) throw runtime_error("imm out of range");
+                    encoded = pack_i((int32_t)imm, rs1, def->funct3, rd, def->opcode);
+                    break;
+                }
+                case FMT_I_SHIFT: {
+                    if(ins.toks.size()<4) throw runtime_error("operand count");
+                    int rd=reg_id(ins.toks[1]); int rs1=reg_id(ins.toks[2]);
+                    long long shamt=parse_imm(ins.toks[3]);
+                    if(shamt<0||shamt>63) throw runtime_error("shamt out of range");
+                    encoded = (def->funct7<<25)|((uint32_t)shamt<<20)|(rs1<<15)|(def->funct3<<12)|(rd<<7)|def->opcode;
+                    break;
+                }
+                case FMT_I_SHIFT_W: {
+                    if(ins.toks.size()<4) throw runtime_error("operand count");
+                    int rd=reg_id(ins.toks[1]); int rs1=reg_id(ins.toks[2]);
+                    long long shamt=parse_imm(ins.toks[3]);
+                    if(shamt<0||shamt>31) throw runtime_error("shamt out of range");
+                    encoded = (def->funct7<<25)|((uint32_t)shamt<<20)|(rs1<<15)|(def->funct3<<12)|(rd<<7)|def->opcode;
+                    break;
+                }
+                case FMT_I_LOAD: {
+                    if(ins.toks.size()<4) throw runtime_error("bad load");
+                    int rd=reg_id(ins.toks[1]); auto mem=parse_mem_operand(ins.toks,2);
+                    if(!fits_signed(mem.first,12)) throw runtime_error("load imm out of range");
+                    encoded = pack_i((int32_t)mem.first, mem.second, def->funct3, rd, def->opcode);
+                    break;
+                }
+                case FMT_I_JALR: {
+                    if(ins.toks.size()<4) throw runtime_error("bad jalr");
+                    int rd=reg_id(ins.toks[1]); int rs1=reg_id(ins.toks[2]);
+                    long long imm=parse_imm(ins.toks[3]);
+                    encoded = pack_i((int32_t)imm, rs1, def->funct3, rd, def->opcode);
+                    break;
+                }
+                case FMT_S: {
+                    if(ins.toks.size()<4) throw runtime_error("bad store");
+                    int rs2=reg_id(ins.toks[1]); auto mem=parse_mem_operand(ins.toks,2);
+                    if(!fits_signed(mem.first,12)) throw runtime_error("store imm out of range");
+                    encoded = pack_s((int32_t)mem.first, rs2, mem.second, def->funct3, def->opcode);
+                    break;
+                }
+                case FMT_B: {
+                    if(ins.toks.size()<4) throw runtime_error("bad branch");
+                    int rs1=reg_id(ins.toks[1]); int rs2=reg_id(ins.toks[2]);
+                    uint32_t tgt=get_label_addr(ins.toks[3]);
+                    long long rel=(long long)tgt-(long long)ins.offset;
+                    encoded = pack_b((int32_t)rel, rs2, rs1, def->funct3, def->opcode);
+                    break;
+                }
+                case FMT_U: {
+                    if(ins.toks.size()<3) throw runtime_error("bad u-type");
+                    int rd=reg_id(ins.toks[1]); long long imm=parse_imm(ins.toks[2]);
+                    encoded = pack_u((int32_t)imm, rd, def->opcode);
+                    break;
+                }
+                case FMT_J: {
+                    if(ins.toks.size()<3) throw runtime_error("bad jal");
+                    int rd=reg_id(ins.toks[1]); uint32_t tgt=get_label_addr(ins.toks[2]);
+                    long long rel=(long long)tgt-(long long)ins.offset;
+                    encoded = pack_j((int32_t)rel, rd, def->opcode);
+                    break;
+                }
+                }
             }
             // __la_hi rd, symbol -> lui rd, hi20(symbol_addr)  [la伪指令上半]
             else if(op=="__la_hi"){
