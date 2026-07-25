@@ -43,6 +43,22 @@ vector<string> tokenize_line(const string &s_raw){
             i++;
             continue;
         }
+        // 引号内内容作为一个完整token（支持 .string "hello world"）
+        if(c=='"'){
+            push();
+            cur.push_back(c);
+            i++;
+            while(i<s.size() && s[i] != '"'){
+                cur.push_back(s[i]);
+                i++;
+            }
+            if(i<s.size()){
+                cur.push_back(s[i]); // 闭合引号
+                i++;
+            }
+            push();
+            continue;
+        }
         // other chars part of token
         cur.push_back(c);
         i++;
@@ -95,6 +111,33 @@ long long parse_imm(const string &s){
     }catch(const exception &e){
         throw runtime_error(string("Immediate parse error: '") + s + "'");
     }
+}
+
+// 解析带引号的字符串内容，处理转义字符 (支持 \n \t \r \0 \\ \" \')
+string parse_string_literal(const string &tok){
+    if(tok.size()<2 || tok.front()!='"' || tok.back()!='"')
+        throw runtime_error("Expected quoted string: "+tok);
+    string raw = tok.substr(1, tok.size()-2);
+    string out;
+    for(size_t i=0;i<raw.size();i++){
+        if(raw[i]=='\\' && i+1<raw.size()){
+            char n = raw[i+1];
+            switch(n){
+                case 'n': out.push_back('\n'); break;
+                case 't': out.push_back('\t'); break;
+                case 'r': out.push_back('\r'); break;
+                case '0': out.push_back('\0'); break;
+                case '\\': out.push_back('\\'); break;
+                case '"': out.push_back('"'); break;
+                case '\'': out.push_back('\''); break;
+                default: out.push_back(n); break;
+            }
+            i++;
+        } else {
+            out.push_back(raw[i]);
+        }
+    }
+    return out;
 }
 
 static inline uint32_t pack_r(uint32_t funct7, uint32_t rs2, uint32_t rs1, uint32_t funct3, uint32_t rd, uint32_t opcode){
@@ -402,6 +445,53 @@ static bool expand_pseudo(
         return true;
     }
 
+    // la rd, symbol -> __la_hi + __la_lo (第二遍查symtab计算hi20/lo12)
+    if(op == "la"){
+        if(toks.size() < 3) throw runtime_error("la: missing operands");
+        out.push_back({"__la_hi", toks[1], toks[2]});
+        out.push_back({"__la_lo", toks[1], toks[2]});
+        return true;
+    }
+    // call symbol -> jal ra, symbol (简化版，范围±1MB)
+    if(op == "call"){
+        out.push_back({"jal", "ra", toks[1]});
+        return true;
+    }
+    // tail symbol -> jal x0, symbol
+    if(op == "tail"){
+        out.push_back({"jal", "x0", toks[1]});
+        return true;
+    }
+    // 零比较分支: bgez/bltz/bgtz/blez
+    if(op == "bgez"){ out.push_back({"bge", toks[1], "x0", toks[2]}); return true; }
+    if(op == "bltz"){ out.push_back({"blt", toks[1], "x0", toks[2]}); return true; }
+    if(op == "bgtz"){ out.push_back({"blt", "x0", toks[1], toks[2]}); return true; }
+    if(op == "blez"){ out.push_back({"bge", "x0", toks[1], toks[2]}); return true; }
+    // not rd, rs -> xori rd, rs, -1
+    if(op == "not"){ out.push_back({"xori", toks[1], toks[2], "-1"}); return true; }
+    // negw rd, rs -> subw rd, x0, rs
+    if(op == "negw"){ out.push_back({"subw", toks[1], "x0", toks[2]}); return true; }
+    // jalr 多操作数格式
+    if(op == "jalr"){
+        if(toks.size() == 2){
+            // jalr rs1 -> jalr ra, rs1, 0
+            out.push_back({"jalr", "ra", toks[1], "0"});
+            return true;
+        }
+        if(toks.size() == 3){
+            // jalr rd, rs1 -> jalr rd, rs1, 0
+            out.push_back({"jalr", toks[1], toks[2], "0"});
+            return true;
+        }
+        if(toks.size() == 6 && toks[3]=="(" && toks[5]==")"){
+            // jalr rd, imm(rs1) -> jalr rd, rs1, imm
+            out.push_back({"jalr", toks[1], toks[4], toks[2]});
+            return true;
+        }
+        // jalr rd, rs1, imm -> 不展开，交给第二遍
+        return false;
+    }
+
     return false;
 }
 
@@ -484,17 +574,32 @@ int main(int argc, char**argv){
                     if(cursec==SEC_DATA) data_off = ( (data_off + align - 1) / align ) * align;
                 }
                 continue;
-            }else if(d==".word"){
-                if(cursec!=SEC_DATA){
-                    cerr<<"Warning .word outside .data at line "<<L.lineno<<"\n";
-                }
-                Instr ins;
-                ins.lineno=L.lineno;
-                ins.sec=SEC_DATA;
-                ins.offset=data_off;
-                ins.toks=toks;
+            }else if(d==".word"||d==".4byte"){
+                if(cursec!=SEC_DATA) cerr<<"Warning .word outside .data at line "<<L.lineno<<"\n";
+                Instr ins; ins.lineno=L.lineno; ins.sec=SEC_DATA;
+                ins.offset=data_off; ins.toks=toks;
+                instrs.push_back(ins); data_off+=4; continue;
+            }else if(d==".byte"){
+                Instr ins; ins.lineno=L.lineno; ins.sec=SEC_DATA;
+                ins.offset=data_off; ins.toks=toks;
+                instrs.push_back(ins); data_off+=1; continue;
+            }else if(d==".2byte"||d==".half"){
+                data_off = (data_off + 1) & ~1u; // 对齐2字节
+                Instr ins; ins.lineno=L.lineno; ins.sec=SEC_DATA;
+                ins.offset=data_off; ins.toks=toks;
+                instrs.push_back(ins); data_off+=2; continue;
+            }else if(d==".8byte"||d==".quad"){
+                data_off = (data_off + 7) & ~7u; // 对齐8字节
+                Instr ins; ins.lineno=L.lineno; ins.sec=SEC_DATA;
+                ins.offset=data_off; ins.toks=toks;
+                instrs.push_back(ins); data_off+=8; continue;
+            }else if(d==".string"||d==".asciz"||d==".ascii"){
+                Instr ins; ins.lineno=L.lineno; ins.sec=SEC_DATA;
+                ins.offset=data_off; ins.toks=toks;
                 instrs.push_back(ins);
-                data_off+=4;
+                string s = parse_string_literal(toks[1]);
+                data_off += s.size();
+                if(d==".string"||d==".asciz") data_off += 1; // \0结尾
                 continue;
             }else{
                 continue;
@@ -561,15 +666,38 @@ int main(int argc, char**argv){
 
     for(auto &ins:instrs){
         if(ins.sec==SEC_DATA){
-            if(ins.toks.size()>0 && ins.toks[0]==".word"){
-                if(ins.toks.size()<2) throw runtime_error("bad .word");
-                long long v = parse_imm(ins.toks[1]);
-                uint32_t w = (uint32_t)v;
-                if(ins.offset + 4 > dataout.size()) throw runtime_error("data overflow");
-                memcpy(&dataout[ins.offset], &w, 4);
-                continue;
-            } else if(ins.toks.size()==0) continue;
-            else { /* ignore other data directives for now */ continue; }
+            if(ins.toks.empty()) continue;
+            string d = ins.toks[0];
+            try {
+                if(d==".word"||d==".4byte"){
+                    long long v = parse_imm(ins.toks[1]);
+                    uint32_t w = (uint32_t)v;
+                    if(ins.offset + 4 > dataout.size()) throw runtime_error("data overflow");
+                    memcpy(&dataout[ins.offset], &w, 4);
+                } else if(d==".byte"){
+                    long long v = parse_imm(ins.toks[1]);
+                    dataout[ins.offset] = (uint8_t)v;
+                } else if(d==".2byte"||d==".half"){
+                    long long v = parse_imm(ins.toks[1]);
+                    uint16_t w = (uint16_t)v;
+                    if(ins.offset + 2 > dataout.size()) throw runtime_error("data overflow");
+                    memcpy(&dataout[ins.offset], &w, 2);
+                } else if(d==".8byte"||d==".quad"){
+                    long long v = parse_imm(ins.toks[1]);
+                    uint64_t w = (uint64_t)v;
+                    if(ins.offset + 8 > dataout.size()) throw runtime_error("data overflow");
+                    memcpy(&dataout[ins.offset], &w, 8);
+                } else if(d==".string"||d==".asciz"||d==".ascii"){
+                    string s = parse_string_literal(ins.toks[1]);
+                    if(d==".string"||d==".asciz") s.push_back('\0');
+                    if(ins.offset + s.size() > dataout.size()) throw runtime_error("data overflow");
+                    memcpy(&dataout[ins.offset], s.data(), s.size());
+                }
+            } catch(exception &e){
+                cerr<<"Error at line "<<ins.lineno<<": "<<e.what()<<"\n";
+                return 7;
+            }
+            continue;
         }
         if(ins.sec==SEC_TEXT){
             if(ins.toks.empty()) continue;
@@ -645,7 +773,21 @@ int main(int argc, char**argv){
                 long long imm = parse_imm(ins.toks[2]);
                 encoded = encode_u_type(op, rd, imm);
             }
-            // simple pseudo-ops were expanded in pass1, so no "li" or "mv" at this point
+            // __la_hi rd, symbol -> lui rd, hi20(symbol_addr)  [la伪指令上半]
+            else if(op=="__la_hi"){
+                int rd = reg_id(ins.toks[1]);
+                uint32_t tgt = get_label_addr(ins.toks[2]);
+                long long hi20 = ((long long)tgt + 0x800) >> 12;
+                encoded = encode_u_type("lui", rd, hi20 << 12);
+            }
+            // __la_lo rd, symbol -> addi rd, rd, lo12(symbol_addr)  [la伪指令下半]
+            else if(op=="__la_lo"){
+                int rd = reg_id(ins.toks[1]);
+                uint32_t tgt = get_label_addr(ins.toks[2]);
+                long long hi20 = ((long long)tgt + 0x800) >> 12;
+                long long lo12 = (long long)tgt - (hi20 << 12);
+                encoded = encode_i_type("addi", rd, rd, lo12);
+            }
             else {
                 throw runtime_error("Unknown opcode: "+op);
             }
