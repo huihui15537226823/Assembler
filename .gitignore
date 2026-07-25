@@ -1,0 +1,13 @@
+# 构建产物
+*.o
+myasstest
+
+# 与汇编器无关的测试源文件
+test.c
+
+# 汇编器输出
+output.o
+
+# IDE / 编辑器
+*.swp
+*~
