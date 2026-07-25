@@ -157,6 +157,14 @@ uint32_t encode_r_type(const string &op, int rd, int rs1, int rs2){
     if(op=="sra") return pack_r(0x20, rs2, rs1, 0x5, rd, 0x33);
     if(op=="or")  return pack_r(0x00, rs2, rs1, 0x6, rd, 0x33);
     if(op=="and") return pack_r(0x00, rs2, rs1, 0x7, rd, 0x33);
+    // RV64I W 变体 (32位运算，opcode=0x3b)
+    // addw: rd = (rs1 + rs2)[31:0] 符号扩展
+    // subw: rd = (rs1 - rs2)[31:0] 符号扩展
+    if(op=="addw") return pack_r(0x00, rs2, rs1, 0x0, rd, 0x3b);
+    if(op=="subw") return pack_r(0x20, rs2, rs1, 0x0, rd, 0x3b);
+    if(op=="sllw") return pack_r(0x00, rs2, rs1, 0x1, rd, 0x3b);
+    if(op=="srlw") return pack_r(0x00, rs2, rs1, 0x5, rd, 0x3b);
+    if(op=="sraw") return pack_r(0x20, rs2, rs1, 0x5, rd, 0x3b);
     throw runtime_error("Unknown R-type: "+op);
 }
 
@@ -225,6 +233,23 @@ uint32_t encode_i_type(const string &op, int rd, int rs1, long long imm){
     if(op=="jalr"){
         if(!fits_signed(imm,12)) throw runtime_error("jalr imm out of range");
         return pack_i((int32_t)imm, rs1, 0x0, rd, 0x67);
+    }
+    // RV64I I-type W 变体 (opcode=0x1b)
+    if(op=="addiw"){
+        if(!fits_signed(imm,12)) throw runtime_error("addiw immediate out of range");
+        return pack_i((int32_t)imm, rs1, 0x0, rd, 0x1b);
+    }
+    if(op=="slliw"){
+        if(imm < 0 || imm > 31) throw runtime_error("slliw shamt out of range");
+        return (0x00<<25) | ((uint32_t)imm<<20) | (rs1<<15) | (0x1<<12) | (rd<<7) | 0x1b;
+    }
+    if(op=="srliw"){
+        if(imm < 0 || imm > 31) throw runtime_error("srliw shamt out of range");
+        return (0x00<<25) | ((uint32_t)imm<<20) | (rs1<<15) | (0x5<<12) | (rd<<7) | 0x1b;
+    }
+    if(op=="sraiw"){
+        if(imm < 0 || imm > 31) throw runtime_error("sraiw shamt out of range");
+        return (0x20<<25) | ((uint32_t)imm<<20) | (rs1<<15) | (0x5<<12) | (rd<<7) | 0x1b;
     }
     throw runtime_error("Unknown I-type: "+op);
 }
@@ -324,6 +349,29 @@ static bool expand_pseudo(
 
     if(op == "bgtu"){
         out.push_back({"bltu", toks[2], toks[1], toks[3]});
+        return true;
+    }
+
+    //  li rd, imm (Load Immediate)
+    //  小立即数[-2048,2047]: addi rd, x0, imm
+    //  大立即数: lui rd, hi20 + addi rd, rd, lo12
+    //  hi20 = (imm + 0x800) >> 12  -- 0x800补偿低12位符号扩展的进位
+    //  lo12 = imm - (hi20 << 12)   -- 保证落在[-2048,2047]
+    if(op == "li"){
+        if(toks.size() < 3) throw runtime_error("li: missing operands");
+        long long imm = parse_imm(toks[2]);
+        if(fits_signed(imm, 12)){
+            // addi rd, x0, imm  -- x0作为源寄存器，等价于rd=imm
+            out.push_back({"addi", toks[1], "x0", toks[2]});
+        } else {
+            // lui rd, hi20 ; addi rd, rd, lo12
+            long long hi20 = (imm + 0x800) >> 12;
+            long long lo12 = imm - (hi20 << 12);
+            // pack_u期望传入左移12位后的值(imm & 0xFFFFF000)
+            out.push_back({"lui", toks[1], to_string(hi20 << 12)});
+            if(lo12 != 0)
+                out.push_back({"addi", toks[1], toks[1], to_string(lo12)});
+        }
         return true;
     }
 
@@ -475,7 +523,24 @@ int main(int argc, char**argv){
                     data_off += 4;
                 }
             }
-            continue; 
+            continue;
+        }
+
+        // 非伪指令：直接作为单条真实指令处理
+        {
+            Instr ins;
+            ins.lineno = L.lineno;
+            ins.sec = cursec;
+            ins.toks = toks;
+            if(cursec == SEC_TEXT){
+                ins.offset = text_off;
+                instrs.push_back(ins);
+                text_off += 4;
+            }else if(cursec == SEC_DATA){
+                ins.offset = data_off;
+                instrs.push_back(ins);
+                data_off += 4;
+            }
         }
     }    
 
@@ -514,7 +579,7 @@ int main(int argc, char**argv){
 
             try{
                 // R-type: op rd rs1 rs2
-            if(op=="add"||op=="sub"||op=="sll"||op=="slt"||op=="sltu"||op=="xor"||op=="srl"||op=="sra"||op=="or"||op=="and"){
+            if(op=="add"||op=="sub"||op=="sll"||op=="slt"||op=="sltu"||op=="xor"||op=="srl"||op=="sra"||op=="or"||op=="and"||op=="addw"||op=="subw"||op=="sllw"||op=="srlw"||op=="sraw"){
                 if(ins.toks.size()<4) throw runtime_error("operand count");
                 int rd = reg_id(ins.toks[1]);
                 int rs1 = reg_id(ins.toks[2]);
@@ -522,7 +587,7 @@ int main(int argc, char**argv){
                 encoded = encode_r_type(op, rd, rs1, rs2);
             }
             // I-type arithmetic: addi, etc. form: addi rd rs1 imm
-            else if(op=="addi"||op=="slti"||op=="sltiu"||op=="xori"||op=="ori"||op=="andi"||op=="slli"||op=="srli"||op=="srai"){
+            else if(op=="addi"||op=="slti"||op=="sltiu"||op=="xori"||op=="ori"||op=="andi"||op=="slli"||op=="srli"||op=="srai"||op=="addiw"||op=="slliw"||op=="srliw"||op=="sraiw"){
                 if(ins.toks.size()<4) throw runtime_error("operand count");
                 int rd = reg_id(ins.toks[1]);
                 int rs1 = reg_id(ins.toks[2]);
