@@ -197,6 +197,9 @@ enum InstrFormat {
     FMT_B,          // beq rs1, rs2, label
     FMT_U,          // lui rd, imm
     FMT_J,          // jal rd, label
+    FMT_I_CSR,      // csrrw rd, csr, rs1
+    FMT_I_CSR_IMM,  // csrrwi rd, csr, imm5
+    FMT_NONE,       // ecall/ebreak (无操作数)
 };
 
 // 指令定义：一条指令的完整编码信息
@@ -245,6 +248,21 @@ static const InstrDef instr_table[] = {
     {"lui",   0x37, 0, 0, FMT_U},  {"auipc", 0x17, 0, 0, FMT_U},
     // J-type
     {"jal", 0x6f, 0, 0, FMT_J},
+    // M扩展 RV64 (opcode=0x33, funct7=0x01)
+    {"mul",    0x33, 0x0, 0x01, FMT_R},  {"mulh",   0x33, 0x1, 0x01, FMT_R},
+    {"mulhsu", 0x33, 0x2, 0x01, FMT_R},  {"mulhu",  0x33, 0x3, 0x01, FMT_R},
+    {"div",    0x33, 0x4, 0x01, FMT_R},  {"divu",   0x33, 0x5, 0x01, FMT_R},
+    {"rem",    0x33, 0x6, 0x01, FMT_R},  {"remu",   0x33, 0x7, 0x01, FMT_R},
+    // M扩展 W变体 (opcode=0x3b, funct7=0x01)
+    {"mulw",   0x3b, 0x0, 0x01, FMT_R},  {"divw",   0x3b, 0x4, 0x01, FMT_R},
+    {"divuw",  0x3b, 0x5, 0x01, FMT_R},  {"remw",   0x3b, 0x6, 0x01, FMT_R},
+    {"remuw",  0x3b, 0x7, 0x01, FMT_R},
+    // CSR 指令 (opcode=0x73)
+    {"csrrw",  0x73, 0x1, 0, FMT_I_CSR},  {"csrrs",  0x73, 0x2, 0, FMT_I_CSR},
+    {"csrrc",  0x73, 0x3, 0, FMT_I_CSR},  {"csrrwi", 0x73, 0x5, 0, FMT_I_CSR_IMM},
+    {"csrrsi", 0x73, 0x6, 0, FMT_I_CSR_IMM}, {"csrrci", 0x73, 0x7, 0, FMT_I_CSR_IMM},
+    // 系统指令
+    {"ecall",  0x73, 0x0, 0, FMT_NONE},  {"ebreak", 0x73, 0x0, 0, FMT_NONE},
 };
 
 // 查表：根据助记符查找指令定义
@@ -252,6 +270,36 @@ const InstrDef* lookup_instr(const string& op){
     for(auto& d : instr_table)
         if(op == d.mnemonic) return &d;
     return nullptr;
+}
+
+// CSR 寄存器名称 -> 地址映射
+static unordered_map<string, uint32_t> csr_names = {
+    {"mstatus", 0x300}, {"misa", 0x301}, {"mie", 0x304}, {"mtvec", 0x305},
+    {"mscratch", 0x340}, {"mepc", 0x341}, {"mcause", 0x342}, {"mtval", 0x343},
+    {"mip", 0x344}, {"sie", 0x104}, {"sip", 0x142}, {"stvec", 0x105},
+    {"sscratch", 0x140}, {"sepc", 0x141}, {"scause", 0x142}, {"stval", 0x143},
+    {"satp", 0x180}, {"cycle", 0xc00}, {"time", 0xc01}, {"instret", 0xc02},
+};
+
+// 解析 CSR 操作数：支持符号名(mstatus等)和数字(0x300)
+uint32_t parse_csr(const string &s){
+    auto it = csr_names.find(s);
+    if(it != csr_names.end()) return it->second;
+    return (uint32_t)parse_imm(s);
+}
+
+// 解析 fence 的 pred/succ 参数 (如 "rw", "iorw")
+int parse_fence_arg(const string &s){
+    int v = 0;
+    for(char c : s){
+        switch(tolower(c)){
+            case 'i': v |= 0x8; break;
+            case 'o': v |= 0x4; break;
+            case 'r': v |= 0x2; break;
+            case 'w': v |= 0x1; break;
+        }
+    }
+    return v;
 }
 
 uint32_t encode_r_type(const string &op, int rd, int rs1, int rs2){
@@ -545,22 +593,31 @@ static bool expand_pseudo(
     // jalr 多操作数格式
     if(op == "jalr"){
         if(toks.size() == 2){
-            // jalr rs1 -> jalr ra, rs1, 0
             out.push_back({"jalr", "ra", toks[1], "0"});
             return true;
         }
         if(toks.size() == 3){
-            // jalr rd, rs1 -> jalr rd, rs1, 0
             out.push_back({"jalr", toks[1], toks[2], "0"});
             return true;
         }
         if(toks.size() == 6 && toks[3]=="(" && toks[5]==")"){
-            // jalr rd, imm(rs1) -> jalr rd, rs1, imm
             out.push_back({"jalr", toks[1], toks[4], toks[2]});
             return true;
         }
-        // jalr rd, rs1, imm -> 不展开，交给第二遍
         return false;
+    }
+
+    // fence: fence [pred, succ]  默认 rw,rw
+    if(op == "fence"){
+        if(toks.size() >= 3)
+            out.push_back({"__fence", toks[1], toks[2]});
+        else
+            out.push_back({"__fence", "rw", "rw"});
+        return true;
+    }
+    if(op == "fence.i"){
+        out.push_back({"__fence_i"});
+        return true;
     }
 
     return false;
@@ -871,6 +928,30 @@ int main(int argc, char**argv){
                     encoded = pack_j((int32_t)rel, rd, def->opcode);
                     break;
                 }
+                case FMT_I_CSR: {
+                    // csrrw rd, csr, rs1
+                    if(ins.toks.size()<4) throw runtime_error("bad csr");
+                    int rd=reg_id(ins.toks[1]);
+                    uint32_t csr=parse_csr(ins.toks[2]);
+                    int rs1=reg_id(ins.toks[3]);
+                    encoded = (csr<<20)|(rs1<<15)|(def->funct3<<12)|(rd<<7)|def->opcode;
+                    break;
+                }
+                case FMT_I_CSR_IMM: {
+                    // csrrwi rd, csr, imm5
+                    if(ins.toks.size()<4) throw runtime_error("bad csr-imm");
+                    int rd=reg_id(ins.toks[1]);
+                    uint32_t csr=parse_csr(ins.toks[2]);
+                    long long imm=parse_imm(ins.toks[3]);
+                    if(imm<0||imm>31) throw runtime_error("csr imm out of range");
+                    encoded = (csr<<20)|((uint32_t)imm<<15)|(def->funct3<<12)|(rd<<7)|def->opcode;
+                    break;
+                }
+                case FMT_NONE: {
+                    // ecall=0x73, ebreak=0x00100073
+                    encoded = (op=="ebreak") ? 0x00100073 : 0x00000073;
+                    break;
+                }
                 }
             }
             // __la_hi rd, symbol -> lui rd, hi20(symbol_addr)  [la伪指令上半]
@@ -903,6 +984,16 @@ int main(int argc, char**argv){
                     encoded = encode_i_type("addi", rd, rd, 0);
                     text_relocs.push_back({ins.offset, R_RISCV_LO12_I, symname, 0});
                 }
+            }
+            // fence pred, succ -> 编码为 0x0f 类型
+            else if(op=="__fence"){
+                int pred = parse_fence_arg(ins.toks[1]);
+                int succ = parse_fence_arg(ins.toks[2]);
+                encoded = ((pred<<4 | succ) << 20) | 0x0f;
+            }
+            // fence.i -> 0x0000100f
+            else if(op=="__fence_i"){
+                encoded = 0x0000100f;
             }
             else {
                 throw runtime_error("Unknown opcode: "+op);
