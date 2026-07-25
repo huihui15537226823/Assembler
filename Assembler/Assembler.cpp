@@ -653,6 +653,8 @@ int main(int argc, char**argv){
     // Print first pass summary (optional)
     cout<<"=== First pass results ===\n";
 
+    vector<RelocEntry> text_relocs, data_relocs;
+
     vector<uint8_t> textout(max<uint32_t>(1,text_off),0);
     vector<uint8_t> dataout(max<uint32_t>(1,data_off),0);
 
@@ -670,10 +672,19 @@ int main(int argc, char**argv){
             string d = ins.toks[0];
             try {
                 if(d==".word"||d==".4byte"){
-                    long long v = parse_imm(ins.toks[1]);
-                    uint32_t w = (uint32_t)v;
                     if(ins.offset + 4 > dataout.size()) throw runtime_error("data overflow");
-                    memcpy(&dataout[ins.offset], &w, 4);
+                    bool is_imm = true; long long v = 0;
+                    try { v = parse_imm(ins.toks[1]); }
+                    catch(...) { is_imm = false; }
+                    if(is_imm){
+                        uint32_t w = (uint32_t)v;
+                        memcpy(&dataout[ins.offset], &w, 4);
+                    } else {
+                        // 符号引用：生成 R_RISCV_32 重定位
+                        uint32_t w = 0;
+                        memcpy(&dataout[ins.offset], &w, 4);
+                        data_relocs.push_back({ins.offset, R_RISCV_32, ins.toks[1], 0});
+                    }
                 } else if(d==".byte"){
                     long long v = parse_imm(ins.toks[1]);
                     dataout[ins.offset] = (uint8_t)v;
@@ -776,17 +787,33 @@ int main(int argc, char**argv){
             // __la_hi rd, symbol -> lui rd, hi20(symbol_addr)  [la伪指令上半]
             else if(op=="__la_hi"){
                 int rd = reg_id(ins.toks[1]);
-                uint32_t tgt = get_label_addr(ins.toks[2]);
-                long long hi20 = ((long long)tgt + 0x800) >> 12;
-                encoded = encode_u_type("lui", rd, hi20 << 12);
+                string symname = ins.toks[2];
+                auto it = symtab.find(symname);
+                if(it != symtab.end()){
+                    // 本地符号：直接计算地址
+                    long long hi20 = ((long long)it->second.addr + 0x800) >> 12;
+                    encoded = encode_u_type("lui", rd, hi20 << 12);
+                } else {
+                    // 外部符号：生成 R_RISCV_HI20 重定位，链接器修正
+                    encoded = encode_u_type("lui", rd, 0);
+                    text_relocs.push_back({ins.offset, R_RISCV_HI20, symname, 0});
+                }
             }
             // __la_lo rd, symbol -> addi rd, rd, lo12(symbol_addr)  [la伪指令下半]
             else if(op=="__la_lo"){
                 int rd = reg_id(ins.toks[1]);
-                uint32_t tgt = get_label_addr(ins.toks[2]);
-                long long hi20 = ((long long)tgt + 0x800) >> 12;
-                long long lo12 = (long long)tgt - (hi20 << 12);
-                encoded = encode_i_type("addi", rd, rd, lo12);
+                string symname = ins.toks[2];
+                auto it = symtab.find(symname);
+                if(it != symtab.end()){
+                    // 本地符号：直接计算地址
+                    long long hi20 = ((long long)it->second.addr + 0x800) >> 12;
+                    long long lo12 = (long long)it->second.addr - (hi20 << 12);
+                    encoded = encode_i_type("addi", rd, rd, lo12);
+                } else {
+                    // 外部符号：生成 R_RISCV_LO12_I 重定位
+                    encoded = encode_i_type("addi", rd, rd, 0);
+                    text_relocs.push_back({ins.offset, R_RISCV_LO12_I, symname, 0});
+                }
             }
             else {
                 throw runtime_error("Unknown opcode: "+op);
@@ -810,7 +837,7 @@ int main(int argc, char**argv){
 cout<<"=== SECOND PASS DONE ===\n";
 cout<<"Generated text.bin and data.bin\n";
 
-write_elf64_object("output.o", textout, dataout, symtab);
+write_elf64_object("output.o", textout, dataout, symtab, text_relocs, data_relocs);
 
 cout<<"Wrote ELF64 relocatable object: output.o\n";
     return 0;
