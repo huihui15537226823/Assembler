@@ -11,3 +11,9 @@ output.o
 # IDE / 编辑器
 *.swp
 *~
+
+# IDE 配置（个人本地配置）
+.vscode/
+
+# 本地文档
+for_ass.md
