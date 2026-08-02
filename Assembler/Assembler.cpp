@@ -85,8 +85,12 @@ static unordered_map<string, int> abi_to_x = {
 int reg_id(const string &r){
     // ABI name
     auto it = abi_to_x.find(r);
-    if(it != abi_to_x.end())
-        return it->second;
+    if(it != abi_to_x.end()){
+        int v = it->second;
+        // 修复 Bug-A4: 防御性检查,确保返回值在合法范围
+        if(v < 0 || v > 31) throw runtime_error("Register out of range: " + r);
+        return v;
+    }
 
     // xN form
     if(r.size() >= 2 && r[0] == 'x'){

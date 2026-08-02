@@ -24,25 +24,25 @@ struct LineInfo{
 };
 
 struct Instr{
-    size_t lineno;
-    SectionKind sec;
-    uint32_t offset;
+    size_t lineno = 0;       // 修复 Bug-A4: 默认初始化防止未初始化读取
+    SectionKind sec = SEC_NONE;
+    uint32_t offset = 0;
     vector<string> toks;//指令及操作数token化
 };
 
 struct Label{
     string name;
-    SectionKind sec;
-    uint32_t addr;
+    SectionKind sec = SEC_NONE;  // 修复 Bug-A4
+    uint32_t addr = 0;            // 修复 Bug-A4
     bool is_global = false;  // .globl 声明的符号为 true
 };
 
 // 重定位条目（汇编阶段用符号名，写ELF时转为符号索引）
 struct RelocEntry {
-    uint32_t offset;    // 需要修正的位置在节中的偏移
-    uint32_t type;      // R_RISCV_* 重定位类型
+    uint32_t offset = 0;    // 修复 Bug-A4
+    uint32_t type = 0;      // R_RISCV_* 重定位类型
     string   sym_name;  // 引用的符号名
-    int64_t  addend;    // 加数
+    int64_t  addend = 0;    // 加数
 };
 
 static inline uint64_t align_up(uint64_t v, uint64_t a){ return (v + a - 1) & ~(a - 1); }
