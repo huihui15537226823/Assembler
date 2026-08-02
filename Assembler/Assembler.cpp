@@ -714,6 +714,7 @@ int main(int argc, char**argv){
                 flush_labels();
                 continue;
             }else if(d==".word"||d==".4byte"){
+                data_off = (data_off + 3) & ~3u; // 对齐4字节 (修复 Bug-A3)
                 flush_labels();
                 if(cursec!=SEC_DATA) cerr<<"Warning .word outside .data at line "<<L.lineno<<"\n";
                 Instr ins; ins.lineno=L.lineno; ins.sec=SEC_DATA;
