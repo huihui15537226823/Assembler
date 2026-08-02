@@ -812,8 +812,8 @@ int main(int argc, char**argv){
 
     vector<RelocEntry> text_relocs, data_relocs;
 
-    vector<uint8_t> textout(max<uint32_t>(1,text_off),0);
-    vector<uint8_t> dataout(max<uint32_t>(1,data_off),0);
+    vector<uint8_t> textout(text_off,0);   // 修复 Bug-A5: 不再强制最小1字节
+    vector<uint8_t> dataout(data_off,0);
 
     auto get_label_addr=[&](const string &Lname)->uint32_t{
         auto it=symtab.find(Lname);
