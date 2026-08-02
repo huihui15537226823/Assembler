@@ -669,6 +669,14 @@ int main(int argc, char**argv){
     vector<Instr> instrs;
     unordered_map<string,Label> symtab;
     set<string> global_names; // .globl声明的符号名
+    vector<string> pending_labels; // 延迟记录的标签(修复 Bug-A2)
+    auto flush_labels = [&](){
+        for(auto &lbl : pending_labels){
+            uint32_t addr = (cursec==SEC_TEXT? text_off : (cursec==SEC_DATA? data_off : 0));
+            symtab[lbl]=Label{lbl,cursec,addr};
+        }
+        pending_labels.clear();
+    };
 
     for(auto&L :lines){
         auto toks=tokenize_line(L.raw);
@@ -676,8 +684,7 @@ int main(int argc, char**argv){
 
         if(toks.size()>=2 && toks[1]==":"){
             string lbl=toks[0];
-            uint32_t addr = (cursec==SEC_TEXT? text_off : (cursec==SEC_DATA? data_off : 0));
-            symtab[lbl]=Label{lbl,cursec,addr};
+            pending_labels.push_back(lbl); // 延迟记录,等后续指令对齐后再写入
 
             vector<string> rest;
             for(size_t i=2;i<toks.size();++i) rest.push_back(toks[i]);
@@ -687,9 +694,11 @@ int main(int argc, char**argv){
         if(is_directive(toks[0])){
             string d = toks[0];
             if(d==".text"){
+                flush_labels();
                 cursec = SEC_TEXT;
                 continue;
             } else if(d==".data"){
+                flush_labels();
                 cursec = SEC_DATA;
                 continue;
             } else if(d==".globl" || d==".global"){
@@ -702,27 +711,33 @@ int main(int argc, char**argv){
                     if(cursec==SEC_TEXT) text_off = ( (text_off + align - 1) / align ) * align;
                     if(cursec==SEC_DATA) data_off = ( (data_off + align - 1) / align ) * align;
                 }
+                flush_labels();
                 continue;
             }else if(d==".word"||d==".4byte"){
+                flush_labels();
                 if(cursec!=SEC_DATA) cerr<<"Warning .word outside .data at line "<<L.lineno<<"\n";
                 Instr ins; ins.lineno=L.lineno; ins.sec=SEC_DATA;
                 ins.offset=data_off; ins.toks=toks;
                 instrs.push_back(ins); data_off+=4; continue;
             }else if(d==".byte"){
+                flush_labels();
                 Instr ins; ins.lineno=L.lineno; ins.sec=SEC_DATA;
                 ins.offset=data_off; ins.toks=toks;
                 instrs.push_back(ins); data_off+=1; continue;
             }else if(d==".2byte"||d==".half"){
                 data_off = (data_off + 1) & ~1u; // 对齐2字节
+                flush_labels();
                 Instr ins; ins.lineno=L.lineno; ins.sec=SEC_DATA;
                 ins.offset=data_off; ins.toks=toks;
                 instrs.push_back(ins); data_off+=2; continue;
             }else if(d==".8byte"||d==".quad"){
                 data_off = (data_off + 7) & ~7u; // 对齐8字节
+                flush_labels();
                 Instr ins; ins.lineno=L.lineno; ins.sec=SEC_DATA;
                 ins.offset=data_off; ins.toks=toks;
                 instrs.push_back(ins); data_off+=8; continue;
             }else if(d==".string"||d==".asciz"||d==".ascii"){
+                flush_labels();
                 Instr ins; ins.lineno=L.lineno; ins.sec=SEC_DATA;
                 ins.offset=data_off; ins.toks=toks;
                 instrs.push_back(ins);
@@ -738,6 +753,7 @@ int main(int argc, char**argv){
             cerr<<"Error: instruction outside any section at line "<<L.lineno<<"\n";
             return 3;
         }
+        flush_labels();
 
         vector<vector<string>> expanded;
         if(expand_pseudo(toks, expanded)){
@@ -778,6 +794,7 @@ int main(int argc, char**argv){
         }
     }    
 
+    flush_labels(); // flush 残留标签
     // 标记全局符号
     for(auto &gn : global_names){
         auto it = symtab.find(gn);
