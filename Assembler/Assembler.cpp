@@ -954,36 +954,21 @@ int main(int argc, char**argv){
                 }
                 }
             }
-            // __la_hi rd, symbol -> lui rd, hi20(symbol_addr)  [la伪指令上半]
+            // __la_hi rd, symbol -> lui rd, 0 + R_RISCV_HI20 (统一走重定位)
+            // 修复 Bug-A1: 本地符号也必须产生重定位, 由链接器回填最终地址
             else if(op=="__la_hi"){
                 int rd = reg_id(ins.toks[1]);
                 string symname = ins.toks[2];
-                auto it = symtab.find(symname);
-                if(it != symtab.end()){
-                    // 本地符号：直接计算地址
-                    long long hi20 = ((long long)it->second.addr + 0x800) >> 12;
-                    encoded = encode_u_type("lui", rd, hi20 << 12);
-                } else {
-                    // 外部符号：生成 R_RISCV_HI20 重定位，链接器修正
-                    encoded = encode_u_type("lui", rd, 0);
-                    text_relocs.push_back({ins.offset, R_RISCV_HI20, symname, 0});
-                }
+                encoded = encode_u_type("lui", rd, 0);
+                text_relocs.push_back({ins.offset, R_RISCV_HI20, symname, 0});
             }
-            // __la_lo rd, symbol -> addi rd, rd, lo12(symbol_addr)  [la伪指令下半]
+            // __la_lo rd, symbol -> addi rd, rd, 0 + R_RISCV_LO12_I (统一走重定位)
+            // 修复 Bug-A1: 本地符号也必须产生重定位, 由链接器回填最终地址
             else if(op=="__la_lo"){
                 int rd = reg_id(ins.toks[1]);
                 string symname = ins.toks[2];
-                auto it = symtab.find(symname);
-                if(it != symtab.end()){
-                    // 本地符号：直接计算地址
-                    long long hi20 = ((long long)it->second.addr + 0x800) >> 12;
-                    long long lo12 = (long long)it->second.addr - (hi20 << 12);
-                    encoded = encode_i_type("addi", rd, rd, lo12);
-                } else {
-                    // 外部符号：生成 R_RISCV_LO12_I 重定位
-                    encoded = encode_i_type("addi", rd, rd, 0);
-                    text_relocs.push_back({ins.offset, R_RISCV_LO12_I, symname, 0});
-                }
+                encoded = encode_i_type("addi", rd, rd, 0);
+                text_relocs.push_back({ins.offset, R_RISCV_LO12_I, symname, 0});
             }
             // fence pred, succ -> 编码为 0x0f 类型
             else if(op=="__fence"){
